@@ -1,0 +1,198 @@
+version: '3.8'
+
+services:
+  hdfs-cost-advisor:
+    build: .
+    container_name: hdfs-cost-advisor
+    ports:
+      - "8000:8000"
+    environment:
+      # HDFS Configuration
+      - HDFS_HOST=${HDFS_HOST:-namenode}
+      - HDFS_PORT=${HDFS_PORT:-9000}
+      - HDFS_USER=${HDFS_USER:-hadoop}
+      - HDFS_AUTH_TYPE=${HDFS_AUTH_TYPE:-simple}
+      - HDFS_NAMENODE_WEB_PORT=${HDFS_NAMENODE_WEB_PORT:-9870}
+      
+      # LLM Configuration
+      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-3000}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.3}
+      
+      # Cost Configuration
+      - STANDARD_STORAGE_COST_PER_GB=${STANDARD_STORAGE_COST_PER_GB:-0.04}
+      - COLD_STORAGE_COST_PER_GB=${COLD_STORAGE_COST_PER_GB:-0.01}
+      - ARCHIVE_STORAGE_COST_PER_GB=${ARCHIVE_STORAGE_COST_PER_GB:-0.005}
+      - METADATA_COST_PER_FILE=${METADATA_COST_PER_FILE:-0.0001}
+      - NETWORK_COST_PER_GB=${NETWORK_COST_PER_GB:-0.01}
+      
+      # Server Configuration
+      - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
+      - SERVER_PORT=${SERVER_PORT:-8000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Redis Configuration (optional)
+      - REDIS_ENABLED=${REDIS_ENABLED:-true}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      
+      # Security Configuration
+      - ENABLE_AUTH=${ENABLE_AUTH:-false}
+      - AUTH_SECRET_KEY=${AUTH_SECRET_KEY}
+      
+      # Environment
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    depends_on:
+      - redis
+      - namenode
+      - datanode
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    networks:
+      - hadoop-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: hdfs-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - hadoop-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  namenode:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-namenode
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_namenode_name_dir=/hadoop/dfs/name
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HADOOP_USER_NAME=hadoop
+    command: ["hdfs", "namenode"]
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks:
+      - hadoop-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  datanode:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-datanode
+    ports:
+      - "9864:9864"
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_datanode_data_dir=/hadoop/dfs/data
+      - HDFS_CONF_dfs_datanode_address=datanode:9866
+      - HDFS_CONF_dfs_datanode_http_address=datanode:9864
+      - HDFS_CONF_dfs_datanode_ipc_address=datanode:9867
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HADOOP_USER_NAME=hadoop
+    command: ["hdfs", "datanode"]
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    networks:
+      - hadoop-network
+    depends_on:
+      - namenode
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9864/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Resource Manager (optional, for YARN)
+  resourcemanager:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-resourcemanager
+    ports:
+      - "8088:8088"
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_resourcemanager_address=resourcemanager:8032
+      - YARN_CONF_yarn_resourcemanager_scheduler_address=resourcemanager:8030
+      - YARN_CONF_yarn_resourcemanager_resource_tracker_address=resourcemanager:8031
+      - YARN_CONF_yarn_resourcemanager_admin_address=resourcemanager:8033
+      - YARN_CONF_yarn_resourcemanager_webapp_address=resourcemanager:8088
+      - HADOOP_USER_NAME=hadoop
+    command: ["yarn", "resourcemanager"]
+    volumes:
+      - resourcemanager_data:/hadoop/yarn/timeline
+    networks:
+      - hadoop-network
+    depends_on:
+      - namenode
+      - datanode
+    restart: unless-stopped
+    profiles:
+      - yarn
+
+  # Node Manager (optional, for YARN)
+  nodemanager:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-nodemanager
+    ports:
+      - "8042:8042"
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_nodemanager_resource_memory_mb=2048
+      - YARN_CONF_yarn_nodemanager_resource_cpu_vcores=2
+      - YARN_CONF_yarn_nodemanager_disk_health_checker_max_disk_utilization_per_disk_percentage=98.5
+      - YARN_CONF_yarn_nodemanager_remote_app_log_dir=/app-logs
+      - YARN_CONF_yarn_nodemanager_webapp_address=nodemanager:8042
+      - HADOOP_USER_NAME=hadoop
+    command: ["yarn", "nodemanager"]
+    volumes:
+      - nodemanager_data:/hadoop/yarn/logs
+    networks:
+      - hadoop-network
+    depends_on:
+      - resourcemanager
+    restart: unless-stopped
+    profiles:
+      - yarn
+
+volumes:
+  namenode_data:
+  datanode_data:
+  resourcemanager_data:
+  nodemanager_data:
+  redis_data:
+
+networks:
+  hadoop-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
